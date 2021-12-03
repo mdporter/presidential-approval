@@ -243,17 +243,14 @@ fit_models <- function(data, k, gap, lims){
 # )
 
 
+
 # simulate_polls()
 #=============================================================================#
 # Simulate aggregated polling data
 #
 # Inputs:
 #   data: original observed data
-#   chgpts: vector of change points (days)
-#   beta: coefficients for support rate 
-#    vector of at least length 2. First two elements are intercept and slope.
-#    any other elements are slope change at change points
-#   nT: maximum number of days under observation
+#   alpha: vector of approval probability (starting at day 1)
 #   seed: random seed. If NULL, then doesn't set seed.
 #
 # Outputs:
@@ -270,21 +267,9 @@ fit_models <- function(data, k, gap, lims){
 #     number of respondents (assumed to be equally distributed across all 
 #     survey days)
 #=============================================================================#
-simulate_polls <- function(data, chgpts, beta, nT = max(data$R), seed=NULL){
-
-  #-- Checks
-  if(length(chgpts) != length(beta) - 2){
-    stop("beta must have length(chgpts) + 2 elements")
-  }
-    
-  #-- model matrix
-  X_full = joinpoint_matrix(1:nT, chgpts = chgpts, intercept = TRUE)
+simulate_polls <- function(data, alpha, seed=NULL){
   
-  #-- Make alpha (support probability)
-  beta = as.matrix(beta)
-  eta = as.numeric(X_full %*% beta)
-  alpha = exp(eta)
-  if(any(alpha > 1)) stop("alpha shouldn't be greater than one. Change beta.")
+  if(any(alpha > 1)) stop("alpha shouldn't be greater than one.")
   
   #-- Simulate data
   if(!is.null(seed)) set.seed(seed)
@@ -303,11 +288,13 @@ simulate_polls <- function(data, chgpts, beta, nT = max(data$R), seed=NULL){
     mutate(Y = rbinom(n(), size=N, prob=lambda/N)) %>% 
     #: select rows
     select(Y, N, L, R)
-
+  
   list(data = data_sim_agg, 
        alpha = tibble(day = seq_along(alpha), alpha), 
        seed = seed)
 }
-  
+
+
+
   
 
