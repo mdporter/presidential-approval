@@ -1,7 +1,9 @@
 ## Functions for estimating change points in polls
 
-
-# utility functions. Convert date to integer time and time back to date
+# Utility Functions
+#=============================================================================#
+# Convert date to integer time and time back to date
+#=============================================================================#
 date2time <- function(date, start_date, ...){
   start_date = as.Date(start_date)
   as.integer(as.Date(date, ...) - start_date + 1)
@@ -11,48 +13,7 @@ time2date <- function(time, start_date){
   time + start_date - 1
 }
 
-# load_polls()
-#=============================================================================#
-# Loads Polling Data from 538
-# https://projects.fivethirtyeight.com/trump-approval-ratings/
-# source: https://projects.fivethirtyeight.com/trump-approval-data/approval_polllist.csv
-#
-# Inputs: 
-#   poll_grade: grade from 538
-#   date_rng: data range of interest. Use NA to represent min or max of available
-#     data
-# Notes:
-#   - requires readr, dplyr
-#=============================================================================#
-load_polls <- function(poll_grade = c("A+","A","A-"),# use A graded polls only)
-                       date_rng = c(as.Date("2020-01-01"), NA)) { 
-  
-  #-- Load 538 approval polls
-  polls = read_csv("https://projects.fivethirtyeight.com/trump-approval-data/approval_polllist.csv") %>% 
-    mutate_at(vars(startdate, enddate), as.Date, format = "%m/%d/%Y")
-  
-  #-- Settings
-  if(all(is.na(date_rng))) date_rng = rep(NA, 2)
-  full_rng = c(min(polls$startdate), max(polls$enddate))
-  date_rng = if_else(is.na(date_rng), full_rng, date_rng)
-  
-  #-- approval ratings
-  polls %>% 
-    # Select relevant polls
-    filter(president == "Donald Trump",  # president
-           subgroup == "All polls",      # use all polls instead of Adults/Voters
-           #population == "a",            # use adults only; ignore likely or registered voters
-           grade %in% poll_grade,        # 538's grading system for pollsters  
-           between(startdate, date_rng[1], date_rng[2])) %>% # date range 
-    # select columns
-    transmute(startdate, enddate, 
-              p = adjusted_approve / 100,
-              Y = p * samplesize,
-              N = samplesize,
-              grade,
-              poll_id) %>% 
-    distinct() # ensure no duplicates
-}
+
 
 # joinpoint_matrix()
 #=============================================================================#
@@ -95,7 +56,7 @@ joinpoint_matrix <- function(x, chgpts = seq(min(x)+1, max(x)-1, by=1),
 }
 
 
-# cp_poll
+# cp_poll()
 #=============================================================================#
 # Linear joinpoint model (i.e., trend filtering) for interval censored Poisson data
 #
@@ -210,7 +171,7 @@ cp_poll <- function(data, chgpts = c(100, 200),
 #
 # Inputs:
 #   k: number of change points {0, 1, ...}
-#   gap: minimum allow time between change points
+#   gap: minimum time between change points
 #   lims: minimum and maximum values of the change points
 #
 # Outputs:
@@ -229,3 +190,124 @@ search_space <- function(k=3, gap=7, lims=c(2, 99)){
   }
   map_dfr(k, ~get_combos(., x))
 }
+
+# fit_models()
+#=============================================================================#
+# Creates search space, fits models, and records BIC score.
+# runs search_space() and cp_poll() 
+#
+# Inputs:
+#   see arguments for search_space() and cp_poll()
+#
+# Outputs:
+#   tibble of change points and their BIC scores
+#
+# Notes:
+#   requires tibble, dplyr, purrr, progress (for progress bar)
+#=============================================================================#
+fit_models <- function(data, k, gap, lims){
+  tau = search_space(k=k, gap=gap, lims=lims) 
+  BIC = numeric(nrow(tau))
+  pb = progress::progress_bar$new(total = nrow(tau), 
+                                  format="[:bar] :elapsed time; :eta remaining")
+  for(i in 1:nrow(tau)){
+    pb$tick()
+    BIC[i] = cp_poll(data, tau[i,])$BIC
+  }
+  mutate(tau, BIC)
+}
+
+# ## requires: progressr, and (optional) furrr
+# fit_models_parallel <- function(data, k, gap, lims, parallel = FALSE){
+#   tau = search_space(k=k, gap=gap, lims=lims) %>% split(1:nrow(.))
+#   progressr::with_progress({
+#     p <- progressor(steps = length(tau))
+#     if(parallel) BIC <- furrr::future_map_dbl(tau, ~{p(); cp_poll(data, unlist(.x))$BIC})
+#     else BIC <- map_dbl(tau, ~{p(); cp_poll(data, unlist(.x))$BIC})
+#   })
+#   bind_rows(tau) %>% mutate(BIC)
+# }
+# 
+# library(progressr)
+# library(furrr)
+# 
+# availableCores()
+# plan(multisession, workers = 8)
+# handlers(
+#   handler_progress(
+#     format   = "Number of models: :total | (:message) [:bar] :percent | Total Time: :elapsed | Remaining: :eta",
+#     width    = 80,
+#     complete = "+",
+#     clear    = FALSE
+#   )
+# )
+
+
+# simulate_polls()
+#=============================================================================#
+# Simulate aggregated polling data
+#
+# Inputs:
+#   data: original observed data
+#   chgpts: vector of change points (days)
+#   beta: coefficients for support rate 
+#    vector of at least length 2. First two elements are intercept and slope.
+#    any other elements are slope change at change points
+#   nT: maximum number of days under observation
+#   seed: random seed. If NULL, then doesn't set seed.
+#
+# Outputs:
+#   a list with elements
+#   - data: simulated data (data frame)
+#   - alpha: the alpha values per day (data frame)
+#   - seed: random seed used to generate data
+#
+# Details:
+#   Uses the same number and date ranges of original poll data. 
+#   The number of supporters is Poisson with mean sum alpha*n and number of 
+#     non-supporters is Poisson with mean of sum (1-alpha)*n,
+#     where alpha = exp(X %*% beta) is the support probability and n is the 
+#     number of respondents (assumed to be equally distributed across all 
+#     survey days)
+#=============================================================================#
+simulate_polls <- function(data, chgpts, beta, nT = max(data$R), seed=NULL){
+
+  #-- Checks
+  if(length(chgpts) != length(beta) - 2){
+    stop("beta must have length(chgpts) + 2 elements")
+  }
+    
+  #-- model matrix
+  X_full = joinpoint_matrix(1:nT, chgpts = chgpts, intercept = TRUE)
+  
+  #-- Make alpha (support probability)
+  beta = as.matrix(beta)
+  eta = as.numeric(X_full %*% beta)
+  alpha = exp(eta)
+  if(any(alpha > 1)) stop("alpha shouldn't be greater than one. Change beta.")
+  
+  #-- Simulate data
+  if(!is.null(seed)) set.seed(seed)
+  
+  data_sim_agg = data %>%
+    #: generate new N (sample size)
+    mutate(N = rpois(n(), lambda=N)) %>% 
+    #: group by poll 
+    mutate(id = row_number()) %>% 
+    group_by(id, N, L, R) %>% 
+    #: add alpha and calculate lambda
+    mutate(day = list(L:R)) %>% unnest(day) %>% 
+    mutate(alpha = alpha[day], n = N/n()) %>% 
+    summarize(lambda = sum(n*alpha), .groups = "drop") %>% 
+    #: generate new Y (success counts)
+    mutate(Y = rbinom(n(), size=N, prob=lambda/N)) %>% 
+    #: select rows
+    select(Y, N, L, R)
+
+  list(data = data_sim_agg, 
+       alpha = tibble(day = seq_along(alpha), alpha), 
+       seed = seed)
+}
+  
+  
+
