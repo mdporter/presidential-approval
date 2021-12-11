@@ -24,7 +24,7 @@ data = approval %>%
 #-----------------------------------------------------------------------------#
 
 #: Prior on # change points; geometric distribution (truncated)
-p = .3  # geometric parameter
+p = .4       # geometric parameter
 prior_k = tibble(k = 0:4, prior_k = dgeom(k, prob=!!p)) %>% 
   mutate(prior_k = prior_k/sum(prior_k))
 
@@ -65,7 +65,6 @@ B_wide %>%
   
 
 #: Plot-- best fit from each k
-
 data_agg = data %>% 
   rowwise() %>% 
   summarize(t = L:R, len=length(t),  n = N/len, y=Y/len, .groups = "drop") %>% 
